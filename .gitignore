@@ -22,3 +22,6 @@ __pycache__/
 # Data (large files)
 *.xlsx
 *.csv
+
+# Development & Archive
+archive/
