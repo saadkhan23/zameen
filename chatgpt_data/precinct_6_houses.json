@@ -1,0 +1,34 @@
+[
+  {
+    "Metric":"Total Properties",
+    "Value":70
+  },
+  {
+    "Metric":"Median Price (PKR)",
+    "Value":"25,550,000"
+  },
+  {
+    "Metric":"Average Price (PKR)",
+    "Value":"23,770,743"
+  },
+  {
+    "Metric":"Median Price per Sq Yd (PKR)",
+    "Value":"98,027"
+  },
+  {
+    "Metric":"Average Price per Sq Yd (PKR)",
+    "Value":"94,205"
+  },
+  {
+    "Metric":"Min Price (PKR)",
+    "Value":"3,600,000"
+  },
+  {
+    "Metric":"Max Price (PKR)",
+    "Value":"40,000,000"
+  },
+  {
+    "Metric":"Scraped Date",
+    "Value":"2025-11-11 10:22:45"
+  }
+]

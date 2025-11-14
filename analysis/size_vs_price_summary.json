@@ -1,0 +1,32 @@
+[
+  {
+    "precinct": "bahria_town_precinct_5",
+    "n_houses": 58,
+    "median_size_sq_yd": 500.0,
+    "median_price": 50000000.0,
+    "median_price_per_sq_yd": 100000.0,
+    "regression_slope": 109149.29,
+    "regression_intercept": -5311910.72,
+    "r_squared": 0.4246
+  },
+  {
+    "precinct": "bahria_town_precinct_6",
+    "n_houses": 61,
+    "median_size_sq_yd": 272.0,
+    "median_price": 26000000.0,
+    "median_price_per_sq_yd": 100000.0,
+    "regression_slope": 102830.33,
+    "regression_intercept": -736077.9,
+    "r_squared": 0.7018
+  },
+  {
+    "precinct": "bahria_town_precinct_8",
+    "n_houses": 62,
+    "median_size_sq_yd": 272.0,
+    "median_price": 29000000.0,
+    "median_price_per_sq_yd": 110294.12,
+    "regression_slope": 157612.31,
+    "regression_intercept": -12476847.86,
+    "r_squared": 0.3093
+  }
+]
