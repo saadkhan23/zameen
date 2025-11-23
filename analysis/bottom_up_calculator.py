@@ -22,7 +22,30 @@ from pathlib import Path
 import logging
 import pandas as pd
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
+
+# Import shared utilities
+from utils import (
+    get_latest_timestamped_folder,
+    read_excel_sheet,
+    normalize_columns,
+    find_price_column,
+    find_size_column,
+)
+
+# Import constants
+from constants import (
+    DEFAULT_PLOT_SIZE_SQ_YD,
+    DEFAULT_NUM_FLOORS,
+    DEFAULT_COVERAGE_RATIO,
+    CONSTRUCTION_COST_PER_SQ_FT_LOW,
+    CONSTRUCTION_COST_PER_SQ_FT_HIGH,
+    SOFT_COST_PERCENTAGE,
+    CONTINGENCY_PERCENTAGE,
+    UTILITIES_CONNECTION_FIXED_COST,
+    HOA_MONTHLY_MAINTENANCE,
+    SQ_YD_TO_SQ_FT,
+)
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -33,68 +56,61 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def get_latest_timestamped_folder(precinct_dir: Path) -> Optional[Path]:
-    timestamp_folders = [d for d in precinct_dir.iterdir() if d.is_dir()]
-    if not timestamp_folders:
-        return None
-    return sorted(timestamp_folders)[-1]
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [col.lower().replace(" ", "_") for col in df.columns]
-    return df
-
-
-def find_price_column(df: pd.DataFrame) -> Optional[str]:
-    normalized_cols = {col.lower(): col for col in df.columns}
-    for pattern in ("price_pkr", "price", "asking_price", "cost"):
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-    for lower_col, actual_col in normalized_cols.items():
-        if "price" in lower_col or "cost" in lower_col:
-            return actual_col
-    return None
-
-
-def find_size_column(df: pd.DataFrame) -> Optional[str]:
-    normalized_cols = {col.lower(): col for col in df.columns}
-    for pattern in ("area_sqyd", "size_sq_yd", "size", "area_sqm", "area"):
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-    for lower_col, actual_col in normalized_cols.items():
-        if "size" in lower_col or "area" in lower_col or "sq" in lower_col:
-            return actual_col
-    return None
-
-
 def median_plot_price_per_sq_yd(precinct_dir: Path) -> Optional[float]:
+    """
+    Calculate median plot price per square yard for a precinct.
+
+    Args:
+        precinct_dir: Path to precinct directory
+
+    Returns:
+        Median price per sq yd (float), or None if calculation fails
+    """
     latest = get_latest_timestamped_folder(precinct_dir)
     if not latest:
+        logger.debug(f"No timestamped folder found for {precinct_dir.name}")
         return None
     plots_file = latest / "plots.xlsx"
-    if not plots_file.exists():
+
+    df = read_excel_sheet(plots_file)
+    if df is None:
+        logger.debug(f"Could not read plots file: {plots_file}")
         return None
+
     try:
-        x = pd.ExcelFile(plots_file)
-        sheet = "Properties" if "Properties" in x.sheet_names else x.sheet_names[0]
-        df = pd.read_excel(plots_file, sheet_name=sheet)
         df = normalize_columns(df)
         pcol = find_price_column(df)
         scol = find_size_column(df)
         if not pcol or not scol:
+            logger.warning(f"Could not find price/size columns in {plots_file.name}")
             return None
-        prices = pd.to_numeric(df[pcol], errors="coerce")
-        sizes = pd.to_numeric(df[scol], errors="coerce")
-        cpsq = (prices / sizes).dropna()
-        if cpsq.empty:
+
+        try:
+            prices = pd.to_numeric(df[pcol], errors="coerce")
+            sizes = pd.to_numeric(df[scol], errors="coerce")
+            cpsq = (prices / sizes).dropna()
+            if cpsq.empty:
+                logger.warning(f"No valid price/size data in {plots_file.name}")
+                return None
+            return float(cpsq.median())
+        except (ValueError, TypeError, ZeroDivisionError) as e:
+            logger.warning(f"Failed to compute median plot price: {e}")
             return None
-        return float(cpsq.median())
-    except Exception:
+    except Exception as e:
+        logger.error(f"Unexpected error computing median plot price: {e}")
         return None
 
 
-def load_implied_construction_summary() -> Dict[str, float]:
-    """Return median implied construction cost per sq yd per precinct from existing analysis CSV."""
+def load_implied_construction_summary() -> Dict[str, Optional[float]]:
+    """
+    Load median implied construction costs from existing analysis CSV.
+
+    Reads from analysis/construction_cost_summary.csv if it exists.
+
+    Returns:
+        Dict mapping precinct name to median construction cost per sq yd,
+        or None if value not available
+    """
     out: Dict[str, float] = {}
     csv_path = ANALYSIS_DIR / "construction_cost_summary.csv"
     if not csv_path.exists():
@@ -110,17 +126,29 @@ def load_implied_construction_summary() -> Dict[str, float]:
 
 
 def main() -> None:
+    """
+    Main workflow for bottom-up construction cost estimation.
+
+    Steps:
+    1. Load median plot prices per precinct from data
+    2. Calculate construction costs under different scenarios
+    3. Compare with implied costs from listing analysis
+    4. Export JSON with assumptions and scenarios
+
+    Returns:
+        None. Output written to analysis/bottom_up_calculator.json
+    """
     # Defaults and assumptions
-    defaults = {
-        "plot_size_sq_yd": 280,
-        "floors": 2,
-        "coverage_ratio": 0.70,
-        "cost_per_sq_ft_low": 5000,
-        "cost_per_sq_ft_high": 5500,
-        "soft_cost_pct": 0.03,
-        "contingency_pct": 0.10,
-        "utilities_fixed": 300000,
-        "hoa_monthly": 7000,
+    defaults: Dict[str, Union[int, float, str]] = {
+        "plot_size_sq_yd": DEFAULT_PLOT_SIZE_SQ_YD,
+        "floors": DEFAULT_NUM_FLOORS,
+        "coverage_ratio": DEFAULT_COVERAGE_RATIO,
+        "cost_per_sq_ft_low": CONSTRUCTION_COST_PER_SQ_FT_LOW,
+        "cost_per_sq_ft_high": CONSTRUCTION_COST_PER_SQ_FT_HIGH,
+        "soft_cost_pct": SOFT_COST_PERCENTAGE,
+        "contingency_pct": CONTINGENCY_PERCENTAGE,
+        "utilities_fixed": UTILITIES_CONNECTION_FIXED_COST,
+        "hoa_monthly": HOA_MONTHLY_MAINTENANCE,
         "currency": "PKR"
     }
 
@@ -151,7 +179,7 @@ def main() -> None:
         cont_pct = defaults["contingency_pct"]
         utilities_fixed = defaults["utilities_fixed"]
 
-        plot_sq_ft = plot_size * 9
+        plot_sq_ft = plot_size * SQ_YD_TO_SQ_FT
         covered_area_sq_ft = plot_sq_ft * coverage * floors
 
         build_low = covered_area_sq_ft * cpsf_low

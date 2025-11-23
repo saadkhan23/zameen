@@ -20,9 +20,19 @@ Usage:
 from pathlib import Path
 import logging
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import sys
-import re
+
+# Import shared utilities
+from utils import (
+    get_latest_timestamped_folder,
+    read_excel_sheet,
+    normalize_columns,
+    flag_grey_structure,
+    find_price_column,
+    find_size_column,
+    safe_numeric,
+)
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -37,139 +47,7 @@ logger = logging.getLogger(__name__)
 VERBOSE = "--verbose" in sys.argv
 
 
-def get_latest_timestamped_folder(precinct_dir: Path) -> Optional[Path]:
-    """
-    Find the latest timestamped run folder in a precinct directory.
-
-    Assumes folder names like "2025-11-11_124325" (lexicographically sortable).
-    Returns the path to the latest folder, or None if no valid folders found.
-    """
-    timestamp_folders = [d for d in precinct_dir.iterdir() if d.is_dir()]
-    if not timestamp_folders:
-        return None
-    return sorted(timestamp_folders)[-1]  # Lexicographically largest
-
-
-def read_excel_sheet(filepath: Path, sheet_name: str = "Properties") -> Optional[pd.DataFrame]:
-    """
-    Safely read an Excel sheet.
-
-    Tries to read the specified sheet_name first.
-    Falls back to the first sheet if sheet_name doesn't exist.
-    Returns None if file doesn't exist or read fails.
-    """
-    if not filepath.exists():
-        return None
-
-    try:
-        excel_file = pd.ExcelFile(filepath)
-
-        # Try to use the specified sheet name
-        if sheet_name in excel_file.sheet_names:
-            return pd.read_excel(filepath, sheet_name=sheet_name)
-
-        # Fall back to first sheet
-        return pd.read_excel(filepath, sheet_name=0)
-
-    except Exception as e:
-        logger.warning(f"Failed to read {filepath.name}: {e}")
-        return None
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize DataFrame column names to lowercase with underscores.
-    """
-    df.columns = [col.lower().replace(" ", "_") for col in df.columns]
-    return df
-
-
-def flag_grey_structure(df: pd.DataFrame) -> pd.DataFrame:
-    """Add boolean column 'is_grey_structure' based on title/description keywords."""
-    if df is None or df.empty:
-        return df
-
-    cols = [c for c in df.columns]
-    title_col = None
-    desc_col = None
-    # Find candidate columns post-normalization
-    for c in cols:
-        lc = c.lower()
-        if lc == "title":
-            title_col = c
-        if lc in ("short_description", "description", "details"):
-            desc_col = c if desc_col is None else desc_col
-
-    pattern = re.compile(r"(grey\s*structure|gray\s*structure|grey-?work|greywork|core\s*&\s*shell|core\s*and\s*shell|shell\s*only|structure\s*only|semi[-\s]?finished|unfinished|without\s*finishing)", re.IGNORECASE)
-
-    def is_grey(row) -> bool:
-        t = str(row.get(title_col, "") or "") if title_col else ""
-        d = str(row.get(desc_col, "") or "") if desc_col else ""
-        text = f"{t} \n {d}"
-        return bool(pattern.search(text))
-
-    try:
-        df["is_grey_structure"] = df.apply(is_grey, axis=1)
-    except Exception:
-        df["is_grey_structure"] = False
-    return df
-
-
-def find_price_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the price column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["price_pkr", "price", "asking_price", "cost"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "price" or "cost"
-    for lower_col, actual_col in normalized_cols.items():
-        if "price" in lower_col or "cost" in lower_col:
-            return actual_col
-
-    return None
-
-
-def find_size_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the size column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["area_sqyd", "size_sq_yd", "size", "area_sqm", "area"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "size" or "area" or "sq"
-    for lower_col, actual_col in normalized_cols.items():
-        if "size" in lower_col or "area" in lower_col or "sq" in lower_col:
-            return actual_col
-
-    return None
-
-
-def safe_numeric(val) -> Optional[float]:
-    """
-    Safely convert value to float. Returns None if conversion fails.
-    """
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
-
-
-def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
+def analyze_precinct(precinct_dir: Path) -> Optional[Dict[str, Union[str, float, int]]]:
     """
     Analyze a single precinct: compute construction costs, summarize by percentiles.
 
@@ -227,27 +105,30 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
 
             if price_col and size_col and price_col in df_plots.columns and size_col in df_plots.columns:
                 # Convert to numeric and compute cost per sq yd
-                plot_prices = pd.to_numeric(df_plots[price_col], errors="coerce")
-                plot_sizes = pd.to_numeric(df_plots[size_col], errors="coerce")
+                try:
+                    plot_prices = pd.to_numeric(df_plots[price_col], errors="coerce")
+                    plot_sizes = pd.to_numeric(df_plots[size_col], errors="coerce")
 
-                plot_cost_per_sq_yd = plot_prices / plot_sizes
-                plot_cost_per_sq_yd = plot_cost_per_sq_yd.dropna()
+                    plot_cost_per_sq_yd = plot_prices / plot_sizes
+                    plot_cost_per_sq_yd = plot_cost_per_sq_yd.dropna()
 
-                if len(plot_cost_per_sq_yd) > 0:
-                    median_plot_price_per_sq_yd = plot_cost_per_sq_yd.median()
-                    logger.info(f"  Median plot price per sq yd: {median_plot_price_per_sq_yd:,.0f} PKR")
+                    if len(plot_cost_per_sq_yd) > 0:
+                        median_plot_price_per_sq_yd = plot_cost_per_sq_yd.median()
+                        logger.info(f"  Median plot price per sq yd: {median_plot_price_per_sq_yd:,.0f} PKR")
 
-                    if VERBOSE:
-                        logger.info(f"    [Verbose] Plot stats (n={len(plot_cost_per_sq_yd)})")
-                        logger.info(f"      Min: {plot_cost_per_sq_yd.min():,.0f} PKR/sq yd")
-                        logger.info(f"      p25: {plot_cost_per_sq_yd.quantile(0.25):,.0f} PKR/sq yd")
-                        logger.info(f"      p50: {plot_cost_per_sq_yd.median():,.0f} PKR/sq yd")
-                        logger.info(f"      p75: {plot_cost_per_sq_yd.quantile(0.75):,.0f} PKR/sq yd")
-                        logger.info(f"      Max: {plot_cost_per_sq_yd.max():,.0f} PKR/sq yd")
+                        if VERBOSE:
+                            logger.info(f"    [Verbose] Plot stats (n={len(plot_cost_per_sq_yd)})")
+                            logger.info(f"      Min: {plot_cost_per_sq_yd.min():,.0f} PKR/sq yd")
+                            logger.info(f"      p25: {plot_cost_per_sq_yd.quantile(0.25):,.0f} PKR/sq yd")
+                            logger.info(f"      p50: {plot_cost_per_sq_yd.median():,.0f} PKR/sq yd")
+                            logger.info(f"      p75: {plot_cost_per_sq_yd.quantile(0.75):,.0f} PKR/sq yd")
+                            logger.info(f"      Max: {plot_cost_per_sq_yd.max():,.0f} PKR/sq yd")
+                except (ValueError, TypeError, ZeroDivisionError) as e:
+                    logger.error(f"  Failed to compute plot cost per sq yd: {e}")
             else:
                 logger.warning(f"  Could not find price/size columns in plots. Available: {df_plots.columns.tolist()}")
         except Exception as e:
-            logger.warning(f"  Failed to compute median plot price: {e}")
+            logger.error(f"  Unexpected error computing median plot price: {e}")
 
     # If no plots data, we can't estimate construction cost
     if median_plot_price_per_sq_yd is None:
@@ -262,29 +143,35 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
         size_col = find_size_column(df_houses)
 
         if price_col and size_col and price_col in df_houses.columns and size_col in df_houses.columns:
-            house_prices = pd.to_numeric(df_houses[price_col], errors="coerce")
-            house_sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
+            try:
+                house_prices = pd.to_numeric(df_houses[price_col], errors="coerce")
+                house_sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
 
-            house_cost_per_sq_yd = house_prices / house_sizes
-            house_cost_per_sq_yd = house_cost_per_sq_yd.dropna()
+                house_cost_per_sq_yd = house_prices / house_sizes
+                house_cost_per_sq_yd = house_cost_per_sq_yd.dropna()
 
-            # Implied construction cost = house price per sq yd - median plot price per sq yd
-            construction_costs = (house_cost_per_sq_yd - median_plot_price_per_sq_yd).dropna()
+                # Implied construction cost = house price per sq yd - median plot price per sq yd
+                construction_costs = (house_cost_per_sq_yd - median_plot_price_per_sq_yd).dropna()
+            except (ValueError, TypeError, ZeroDivisionError) as e:
+                logger.error(f"  Failed to compute house cost per sq yd: {e}")
+                return None
         else:
             logger.warning(f"  Could not find price/size columns in houses. Available: {df_houses.columns.tolist()}")
 
     except Exception as e:
-        logger.error(f"  Failed to compute construction costs: {e}")
+        logger.error(f"  Unexpected error computing construction costs: {e}")
         return None
 
     if len(construction_costs) == 0:
         logger.warning(f"  {precinct_name}: No valid construction costs computed. Skipping.")
         return None
 
-    # Compute percentiles
+    # Compute percentiles (including tails for whiskers)
     median_cost = construction_costs.median()
     p25_cost = construction_costs.quantile(0.25)
     p75_cost = construction_costs.quantile(0.75)
+    p10_cost = construction_costs.quantile(0.10)
+    p90_cost = construction_costs.quantile(0.90)
     n_properties = len(construction_costs)
 
     logger.info(f"  {precinct_name} Summary:")
@@ -322,6 +209,8 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
         "median_cost_per_sq_yd": round(median_cost, 2),
         "p25_cost_per_sq_yd": round(p25_cost, 2),
         "p75_cost_per_sq_yd": round(p75_cost, 2),
+        "p10_cost_per_sq_yd": round(p10_cost, 2),
+        "p90_cost_per_sq_yd": round(p90_cost, 2),
         "n_properties": n_properties,
         "n_grey_structures": grey_count
     }
@@ -329,11 +218,16 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
 
 def main() -> None:
     """
-    Main analysis workflow:
+    Main analysis workflow.
+
+    Steps:
     1. Find all precinct folders in data/
     2. Analyze each precinct
     3. Export summary CSV
     4. Print summary to stdout
+
+    Returns:
+        None. Outputs written to analysis/construction_cost_summary.csv
     """
     logger.info("=" * 70)
     logger.info("Zameen Construction Cost Analysis")

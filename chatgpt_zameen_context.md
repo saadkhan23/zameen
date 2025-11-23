@@ -748,6 +748,7 @@ The pipeline is production-ready, maintainable, and extensible. The main opportu
 ---
 
 ## Changelog
+- **2025-11-15** — Refined the construction-cost box plot on the portfolio page: trimmed the chart height/margins, compacted the legend into pill chips, improved axis ticks, and kept the tooltip/crosshair; updated tooltip text to explain tails as percentiles.
 - **2025-11-14** — Implemented grey-structure filtering across analysis (construction cost, bargains, size-vs-price); added counts per precinct; created `analysis/bottom_up_calculator.py` with defaults (floors=2, coverage=0.70, 5k–5.5k PKR/sq ft, soft 3%, contingency 10%, utilities 300k PKR, HOA 7k/month) and exported `bottom_up_calculator.json`; extended portfolio sync to publish it.
 - **2025-11-14** — Added Audience & Scope, Assumptions (HOA 7k/month; finished cost 5–5.5k PKR/sq ft), and Backlog/Next Steps (grey-structure filtering, bottom-up calculator, implied vs bottom-up cross-check, portfolio JSON extensions, rental yields later, BTK-first scope). Aligns documentation with planned analysis and target audience.
 - **2025-11-13** — Created chatgpt_data folder with 12 raw data exports (CSV/JSON) for each precinct/type combination. Added "Raw Data Exports for AI Analysis" section to Data Status.

@@ -21,10 +21,19 @@ from pathlib import Path
 import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import json
 import sys
-import re
+
+# Import shared utilities
+from utils import (
+    get_latest_timestamped_folder,
+    read_excel_sheet,
+    normalize_columns,
+    flag_grey_structure,
+    find_price_column,
+    find_size_column,
+)
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -39,130 +48,18 @@ logger = logging.getLogger(__name__)
 VERBOSE = "--verbose" in sys.argv
 
 
-def get_latest_timestamped_folder(precinct_dir: Path) -> Optional[Path]:
-    """
-    Find the latest timestamped run folder in a precinct directory.
-
-    Assumes folder names like "2025-11-11_124325" (lexicographically sortable).
-    Returns the path to the latest folder, or None if no valid folders found.
-    """
-    timestamp_folders = [d for d in precinct_dir.iterdir() if d.is_dir()]
-    if not timestamp_folders:
-        return None
-    return sorted(timestamp_folders)[-1]  # Lexicographically largest
-
-
-def read_excel_sheet(filepath: Path, sheet_name: str = "Properties") -> Optional[pd.DataFrame]:
-    """
-    Safely read an Excel sheet.
-
-    Tries to read the specified sheet_name first.
-    Falls back to the first sheet if sheet_name doesn't exist.
-    Returns None if file doesn't exist or read fails.
-    """
-    if not filepath.exists():
-        return None
-
-    try:
-        excel_file = pd.ExcelFile(filepath)
-
-        # Try to use the specified sheet name
-        if sheet_name in excel_file.sheet_names:
-            return pd.read_excel(filepath, sheet_name=sheet_name)
-
-        # Fall back to first sheet
-        return pd.read_excel(filepath, sheet_name=0)
-
-    except Exception as e:
-        logger.warning(f"Failed to read {filepath.name}: {e}")
-        return None
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize DataFrame column names to lowercase with underscores.
-    """
-    df.columns = [col.lower().replace(" ", "_") for col in df.columns]
-    return df
-
-
-def flag_grey_structure(df: pd.DataFrame) -> pd.DataFrame:
-    """Add boolean column 'is_grey_structure' based on title/description keywords."""
-    if df is None or df.empty:
-        return df
-
-    cols = [c for c in df.columns]
-    title_col = None
-    desc_col = None
-    for c in cols:
-        lc = c.lower()
-        if lc == "title":
-            title_col = c
-        if lc in ("short_description", "description", "details"):
-            desc_col = c if desc_col is None else desc_col
-
-    pattern = re.compile(r"(grey\s*structure|gray\s*structure|grey-?work|greywork|core\s*&\s*shell|core\s*and\s*shell|shell\s*only|structure\s*only|semi[-\s]?finished|unfinished|without\s*finishing)", re.IGNORECASE)
-
-    def is_grey(row) -> bool:
-        t = str(row.get(title_col, "") or "") if title_col else ""
-        d = str(row.get(desc_col, "") or "") if desc_col else ""
-        text = f"{t} \n {d}"
-        return bool(pattern.search(text))
-
-    try:
-        df["is_grey_structure"] = df.apply(is_grey, axis=1)
-    except Exception:
-        df["is_grey_structure"] = False
-    return df
-
-
-def find_price_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the price column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["price_pkr", "price", "asking_price", "cost"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "price" or "cost"
-    for lower_col, actual_col in normalized_cols.items():
-        if "price" in lower_col or "cost" in lower_col:
-            return actual_col
-
-    return None
-
-
-def find_size_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the size column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["area_sqyd", "size_sq_yd", "size", "area_sqm", "area"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "size" or "area" or "sq"
-    for lower_col, actual_col in normalized_cols.items():
-        if "size" in lower_col or "area" in lower_col or "sq" in lower_col:
-            return actual_col
-
-    return None
-
-
-def fit_linear_regression(prices: pd.Series, sizes: pd.Series) -> Tuple[float, float]:
+def fit_linear_regression(
+    prices: pd.Series, sizes: pd.Series
+) -> Tuple[float, float]:
     """
     Fit a simple linear regression: price = a * size + b
 
-    Returns (a, b) coefficients.
+    Args:
+        prices: Series of property prices
+        sizes: Series of property sizes
+
+    Returns:
+        Tuple of (slope, intercept) coefficients for the linear model
     """
     # Remove NaN values
     valid_idx = prices.notna() & sizes.notna()
@@ -177,23 +74,26 @@ def fit_linear_regression(prices: pd.Series, sizes: pd.Series) -> Tuple[float, f
     return (coeffs[0], coeffs[1])  # (slope, intercept)
 
 
-def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
+def analyze_precinct(precinct_dir: Path) -> Optional[Dict[str, Union[str, int, float]]]:
     """
     Analyze a single precinct: extract size/price data, fit regression.
 
-    Returns a dict with:
-    {
-        "precinct": str,
-        "n_houses": int,
-        "median_size_sq_yd": float,
-        "median_price": float,
-        "median_price_per_sq_yd": float,
-        "slope": float,  # regression coefficient
-        "intercept": float,  # regression intercept
-        "r_squared": float  # R² value
-    }
+    Args:
+        precinct_dir: Path to precinct directory
 
-    Returns None if analysis fails.
+    Returns:
+        Dict with keys:
+        - precinct (str)
+        - n_houses (int)
+        - median_size_sq_yd (float)
+        - median_price (float)
+        - median_price_per_sq_yd (float)
+        - slope (float): regression coefficient
+        - intercept (float): regression intercept
+        - r_squared (float): R² value
+        - n_grey_structures (int)
+
+        Returns None if analysis fails.
     """
     precinct_name = precinct_dir.name
     logger.info(f"Analyzing {precinct_name}...")
@@ -228,28 +128,32 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
 
     # Extract and clean data
     try:
-        prices = pd.to_numeric(df_houses[price_col], errors="coerce")
-        sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
+        try:
+            prices = pd.to_numeric(df_houses[price_col], errors="coerce")
+            sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
 
-        # Remove rows with NaN
-        valid_idx = prices.notna() & sizes.notna()
-        prices = prices[valid_idx]
-        sizes = sizes[valid_idx]
+            # Remove rows with NaN
+            valid_idx = prices.notna() & sizes.notna()
+            prices = prices[valid_idx]
+            sizes = sizes[valid_idx]
 
-        # Exclude grey structures for size vs price analysis
-        non_grey_mask = ~df_houses.get("is_grey_structure", pd.Series(False, index=df_houses.index))
-        prices = prices[non_grey_mask]
-        sizes = sizes[non_grey_mask]
+            # Exclude grey structures for size vs price analysis
+            non_grey_mask = ~df_houses.get("is_grey_structure", pd.Series(False, index=df_houses.index))
+            prices = prices[non_grey_mask]
+            sizes = sizes[non_grey_mask]
 
-        if len(prices) == 0:
-            logger.warning(f"  {precinct_name}: No valid price/size data. Skipping.")
+            if len(prices) == 0:
+                logger.warning(f"  {precinct_name}: No valid price/size data. Skipping.")
+                return None
+
+            # Calculate price per sq yd
+            price_per_sq_yd = prices / sizes
+
+            # Fit regression
+            slope, intercept = fit_linear_regression(prices, sizes)
+        except (ValueError, TypeError, ZeroDivisionError) as e:
+            logger.error(f"  {precinct_name}: Failed to process price/size data: {e}")
             return None
-
-        # Calculate price per sq yd
-        price_per_sq_yd = prices / sizes
-
-        # Fit regression
-        slope, intercept = fit_linear_regression(prices, sizes)
 
         # Calculate R² (coefficient of determination)
         fitted_prices = slope * sizes + intercept
@@ -306,8 +210,11 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
             "n_grey_structures": n_grey
         }
 
+    except (ValueError, TypeError) as e:
+        logger.error(f"  {precinct_name}: Data processing error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"  {precinct_name}: Failed to analyze: {e}")
+        logger.error(f"  {precinct_name}: Unexpected error during analysis: {e}")
         return None
 
 
@@ -372,12 +279,19 @@ def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
 
 def main() -> None:
     """
-    Main analysis workflow:
+    Main analysis workflow.
+
+    Steps:
     1. Find all precinct folders in data/
     2. Analyze each precinct
     3. Export summary CSV with all houses and fitted prices
     4. Export lightweight JSON summary for portfolio
     5. Print summary to stdout
+
+    Returns:
+        None. Outputs written to:
+        - analysis/size_vs_price_sample.csv
+        - analysis/size_vs_price_summary.json
     """
     logger.info("=" * 70)
     logger.info("Zameen Size vs Price Analysis")

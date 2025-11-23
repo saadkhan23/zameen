@@ -22,10 +22,22 @@ from pathlib import Path
 import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import json
 import sys
-import re
+
+# Import shared utilities
+from utils import (
+    get_latest_timestamped_folder,
+    read_excel_sheet,
+    normalize_columns,
+    flag_grey_structure,
+    find_price_column,
+    find_size_column,
+)
+
+# Import constants
+from constants import BARGAIN_Z_SCORE_THRESHOLD, QUANTILE_P10, QUANTILE_P25, QUANTILE_P75
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -40,142 +52,26 @@ logger = logging.getLogger(__name__)
 VERBOSE = "--verbose" in sys.argv
 
 
-def get_latest_timestamped_folder(precinct_dir: Path) -> Optional[Path]:
-    """
-    Find the latest timestamped run folder in a precinct directory.
-
-    Assumes folder names like "2025-11-11_124325" (lexicographically sortable).
-    Returns the path to the latest folder, or None if no valid folders found.
-    """
-    timestamp_folders = [d for d in precinct_dir.iterdir() if d.is_dir()]
-    if not timestamp_folders:
-        return None
-    return sorted(timestamp_folders)[-1]  # Lexicographically largest
-
-
-def read_excel_sheet(filepath: Path, sheet_name: str = "Properties") -> Optional[pd.DataFrame]:
-    """
-    Safely read an Excel sheet.
-
-    Tries to read the specified sheet_name first.
-    Falls back to the first sheet if sheet_name doesn't exist.
-    Returns None if file doesn't exist or read fails.
-    """
-    if not filepath.exists():
-        return None
-
-    try:
-        excel_file = pd.ExcelFile(filepath)
-
-        # Try to use the specified sheet name
-        if sheet_name in excel_file.sheet_names:
-            return pd.read_excel(filepath, sheet_name=sheet_name)
-
-        # Fall back to first sheet
-        return pd.read_excel(filepath, sheet_name=0)
-
-    except Exception as e:
-        logger.warning(f"Failed to read {filepath.name}: {e}")
-        return None
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize DataFrame column names to lowercase with underscores.
-    """
-    df.columns = [col.lower().replace(" ", "_") for col in df.columns]
-    return df
-
-
-def flag_grey_structure(df: pd.DataFrame) -> pd.DataFrame:
-    """Add boolean column 'is_grey_structure' based on title/description keywords."""
-    if df is None or df.empty:
-        return df
-
-    cols = [c for c in df.columns]
-    title_col = None
-    desc_col = None
-    for c in cols:
-        lc = c.lower()
-        if lc == "title":
-            title_col = c
-        if lc in ("short_description", "description", "details"):
-            desc_col = c if desc_col is None else desc_col
-
-    pattern = re.compile(r"(grey\s*structure|gray\s*structure|grey-?work|greywork|core\s*&\s*shell|core\s*and\s*shell|shell\s*only|structure\s*only|semi[-\s]?finished|unfinished|without\s*finishing)", re.IGNORECASE)
-
-    def is_grey(row) -> bool:
-        t = str(row.get(title_col, "") or "") if title_col else ""
-        d = str(row.get(desc_col, "") or "") if desc_col else ""
-        text = f"{t} \n {d}"
-        return bool(pattern.search(text))
-
-    try:
-        df["is_grey_structure"] = df.apply(is_grey, axis=1)
-    except Exception:
-        df["is_grey_structure"] = False
-    return df
-
-
-def find_price_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the price column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["price_pkr", "price", "asking_price", "cost"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "price" or "cost"
-    for lower_col, actual_col in normalized_cols.items():
-        if "price" in lower_col or "cost" in lower_col:
-            return actual_col
-
-    return None
-
-
-def find_size_column(df: pd.DataFrame) -> Optional[str]:
-    """
-    Find the size column by looking for common naming patterns.
-    Returns the actual column name from the dataframe (or None if not found).
-    """
-    normalized_cols = {col.lower(): col for col in df.columns}
-
-    # Try common patterns
-    patterns = ["area_sqyd", "size_sq_yd", "size", "area_sqm", "area"]
-    for pattern in patterns:
-        if pattern in normalized_cols:
-            return normalized_cols[pattern]
-
-    # Try columns that contain "size" or "area" or "sq"
-    for lower_col, actual_col in normalized_cols.items():
-        if "size" in lower_col or "area" in lower_col or "sq" in lower_col:
-            return actual_col
-
-    return None
-
-
-def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
+def analyze_precinct(precinct_dir: Path) -> Optional[Dict[str, Union[str, int, float]]]:
     """
     Analyze a single precinct: identify bargain properties.
 
-    Returns a dict with:
-    {
-        "precinct": str,
-        "n_houses": int,
-        "n_bargains": int,
-        "bargain_pct": float,
-        "median_price_per_sq_yd": float,
-        "std_price_per_sq_yd": float,
-        "min_bargain_price_per_sq_yd": float,
-        "max_bargain_price_per_sq_yd": float
-    }
+    Args:
+        precinct_dir: Path to precinct directory
 
-    Returns None if analysis fails.
+    Returns:
+        Dict with keys:
+        - precinct (str)
+        - n_houses (int)
+        - n_bargains (int)
+        - bargain_pct (float)
+        - median_price_per_sq_yd (float)
+        - std_price_per_sq_yd (float)
+        - min_bargain_price_per_sq_yd (float)
+        - max_bargain_price_per_sq_yd (float)
+        - n_grey_structures (int)
+
+        Returns None if analysis fails.
     """
     precinct_name = precinct_dir.name
     logger.info(f"Analyzing {precinct_name}...")
@@ -210,20 +106,24 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
 
     # Extract and clean data
     try:
-        prices = pd.to_numeric(df_houses[price_col], errors="coerce")
-        sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
+        try:
+            prices = pd.to_numeric(df_houses[price_col], errors="coerce")
+            sizes = pd.to_numeric(df_houses[size_col], errors="coerce")
 
-        # Remove rows with NaN
-        valid_idx = prices.notna() & sizes.notna()
-        prices = prices[valid_idx]
-        sizes = sizes[valid_idx]
+            # Remove rows with NaN
+            valid_idx = prices.notna() & sizes.notna()
+            prices = prices[valid_idx]
+            sizes = sizes[valid_idx]
 
-        if len(prices) == 0:
-            logger.warning(f"  {precinct_name}: No valid price/size data. Skipping.")
+            if len(prices) == 0:
+                logger.warning(f"  {precinct_name}: No valid price/size data. Skipping.")
+                return None
+
+            # Calculate price per sq yd
+            price_per_sq_yd = prices / sizes
+        except (ValueError, TypeError, ZeroDivisionError) as e:
+            logger.error(f"  {precinct_name}: Failed to process price/size data: {e}")
             return None
-
-        # Calculate price per sq yd
-        price_per_sq_yd = prices / sizes
 
         # Exclude grey structures from statistical baseline and counts
         non_grey_mask = ~df_houses.get("is_grey_structure", pd.Series(False, index=df_houses.index))
@@ -242,9 +142,9 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
         # Compute z-scores
         z_scores = (price_per_sq_yd - median_price) / std_price
 
-        # Flag bargains: price_per_sq_yd < median AND z_score < -0.8
+        # Flag bargains: price_per_sq_yd < median AND z_score < threshold
         # Bargains among finished houses only
-        is_bargain = (price_per_sq_yd < median_price) & (z_scores < -0.8) & non_grey_mask
+        is_bargain = (price_per_sq_yd < median_price) & (z_scores < BARGAIN_Z_SCORE_THRESHOLD) & non_grey_mask
 
         n_bargains = int(is_bargain.sum())
         # Count houses considered (non-grey)
@@ -273,14 +173,14 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
         if VERBOSE:
             logger.info(f"    [Verbose] Price per sq yd distribution:")
             logger.info(f"      Min: {price_per_sq_yd.min():,.0f} PKR/sq yd")
-            logger.info(f"      p10: {price_per_sq_yd.quantile(0.10):,.0f} PKR/sq yd")
-            logger.info(f"      p25: {price_per_sq_yd.quantile(0.25):,.0f} PKR/sq yd")
+            logger.info(f"      p10: {price_per_sq_yd.quantile(QUANTILE_P10):,.0f} PKR/sq yd")
+            logger.info(f"      p25: {price_per_sq_yd.quantile(QUANTILE_P25):,.0f} PKR/sq yd")
             logger.info(f"      p50: {price_per_sq_yd.median():,.0f} PKR/sq yd")
-            logger.info(f"      p75: {price_per_sq_yd.quantile(0.75):,.0f} PKR/sq yd")
+            logger.info(f"      p75: {price_per_sq_yd.quantile(QUANTILE_P75):,.0f} PKR/sq yd")
             logger.info(f"      Max: {price_per_sq_yd.max():,.0f} PKR/sq yd")
 
             if len(bargain_prices) > 0:
-                logger.info(f"    [Verbose] Z-score cutoff: -0.8 (price < median AND z < -0.8)")
+                logger.info(f"    [Verbose] Z-score cutoff: {BARGAIN_Z_SCORE_THRESHOLD} (price < median AND z < {BARGAIN_Z_SCORE_THRESHOLD})")
                 logger.info(f"      Sample bargains (first 3):")
                 for idx, (price_sq, z_score) in enumerate(zip(bargain_prices.head(3), z_scores[is_bargain].head(3))):
                     logger.info(f"        {idx+1}. {price_sq:,.0f} PKR/sq yd (z={z_score:.2f})")
@@ -297,14 +197,23 @@ def analyze_precinct(precinct_dir: Path) -> Optional[Dict]:
             "n_grey_structures": n_grey
         }
 
+    except (ValueError, TypeError, ZeroDivisionError) as e:
+        logger.error(f"  {precinct_name}: Data processing error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"  {precinct_name}: Failed to analyze: {e}")
+        logger.error(f"  {precinct_name}: Unexpected error during analysis: {e}")
         return None
 
 
 def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
     """
     Build a comprehensive CSV with all houses and bargain flags.
+
+    Args:
+        precinct_dirs: List of precinct directory paths
+
+    Returns:
+        DataFrame with all properties and bargain analysis
     """
     all_rows = []
 
@@ -354,7 +263,7 @@ def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
 
             # Flag bargains
             # Bargains among finished houses only
-            is_bargain = (price_per_sq_yd < median_price) & (z_scores < -0.8) & non_grey_mask[valid_idx]
+            is_bargain = (price_per_sq_yd < median_price) & (z_scores < BARGAIN_Z_SCORE_THRESHOLD) & non_grey_mask[valid_idx]
 
             # Build rows
             for idx in valid_idx[valid_idx].index:
@@ -363,7 +272,8 @@ def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
                 price_sq_yd = price / size
                 z_score = (price_sq_yd - median_price) / std_price if std_price and std_price != 0 else np.nan
                 bargain = bool(is_bargain[idx]) if idx in is_bargain.index else False
-                
+               
+                url_value = df_houses.at[idx, 'url'] if 'url' in df_houses.columns else None
                 all_rows.append({
                     "precinct": precinct_name,
                     "price": round(price, 2),
@@ -372,6 +282,7 @@ def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
                     "z_score": round(z_score, 4) if not pd.isna(z_score) else None,
                     "is_bargain": 1 if bargain else 0,
                     "is_grey_structure": 1 if df_houses.get("is_grey_structure", pd.Series(False)).get(idx, False) else 0,
+                    "url": url_value,
                 })
         except Exception as e:
             logger.warning(f"Error processing {precinct_name}: {e}")
@@ -382,13 +293,21 @@ def build_detailed_csv(precinct_dirs: List[Path]) -> pd.DataFrame:
 
 def main() -> None:
     """
-    Main analysis workflow:
+    Main analysis workflow.
+
+    Steps:
     1. Find all precinct folders in data/
     2. Analyze each precinct for bargains
     3. Export summary CSV (per precinct)
     4. Export detailed CSV (all properties)
     5. Export lightweight JSON for portfolio
     6. Print summary to stdout
+
+    Returns:
+        None. Outputs written to:
+        - analysis/bargains_summary.csv
+        - analysis/bargains_detailed.csv
+        - analysis/bargains_summary.json
     """
     logger.info("=" * 70)
     logger.info("Zameen Bargains Analysis")
