@@ -25,3 +25,9 @@ __pycache__/
 
 # Development & Archive
 archive/
+
+# Documentation (local development notes)
+chatgpt_zameen_context.md
+IMPROVEMENT_JOURNEY.md
+ERROR_HANDLING_GUIDE.md
+DOCS_UPDATE_CHECKLIST.md
